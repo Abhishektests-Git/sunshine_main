@@ -995,8 +995,8 @@
         max-width: 1060px;
       }
       /* Section background follows the centre photo: two blurred
-         cover layers stacked inside #s-slides crossfade (~0.8s)
-         whenever the centre photo changes, under a pink/cream wash
+         cover layers stacked inside #s-slides crossfade (~1.2s)
+         once the carousel settles on a centre photo, under a pink/cream wash
          so the heading, caption, dots and crisp slider photos stay
          perfectly readable and the section keeps its pink identity.
          Layers are absolute inset 0 (section height never changes),
@@ -1116,9 +1116,9 @@
         background-position: center;
         background-repeat: no-repeat;
         filter: blur(22px) saturate(1.05);
-        transform: scale(1.08);
+        transform: scale(1.08) translateZ(0);
         opacity: 0;
-        transition: opacity 0.8s ease;
+        transition: opacity 1.2s ease;
         will-change: opacity;
       }
       /* The blurred centre photo renders at full strength;
@@ -1138,6 +1138,11 @@
       .slides-bg-wash {
         position: absolute;
         inset: 0;
+        /* Above both photo layers at all times: the crossfade
+           stacks the incoming photo layer (z-index 2) over the
+           outgoing one (z-index 1), and the wash must stay on
+           top of both so its pink veil never dips mid-fade. */
+        z-index: 3;
         background: linear-gradient(
           to bottom,
           rgba(255, 240, 245, 0.45) 0%,
@@ -3026,8 +3031,10 @@
           var main = document.getElementById("main");
           if (intro) intro.style.display = "none";
           if (main) main.style.display = "block";
-          var mb0 = document.getElementById("musicBtn");
-          if (mb0) mb0.style.display = "";
+          // The music button stays hidden on entry: it is only
+          // revealed when the candle is blown (see blowCandle and
+          // the music gate's start path). Entry merely primes the
+          // song silently below.
           window.scrollTo(0, 0);
           try {
             if (typeof window.primeSong === "function") window.primeSong();
@@ -3527,7 +3534,7 @@
       <section class="reveal" id="s-letter">
         <div class="content">
           <div class="eyebrow">A letter from my heart</div>
-          <h2>Dear Bby...</h2>
+          <h2>Hey love...</h2>
           <div class="soft-card love-letter">
             My dearest Sakshi, Happy Birthday, Bby! 🤍 I don't know if words
             will ever be enough to explain how special you are to me. I hope you
@@ -3541,8 +3548,7 @@
             happiness your heart can hold. May your dreams find their way to
             you, and may that beautiful smile of yours never fade. You deserve
             the softest love, the warmest hugs, and a thousand reasons to be
-            happy. Happy Birthday once again, my Bby. With all my love, Your
-            person. 🤍
+            happy. Happy Birthday once again, my Bby. With all my love, Yours Aevi. 🤍
           </div>
         </div>
       </section>
@@ -4054,7 +4060,8 @@
       function enter() {
         document.getElementById("intro").style.display = "none";
         document.getElementById("main").style.display = "block";
-        document.getElementById("musicBtn").style.display = "";
+        // Music button intentionally NOT shown here: it stays
+        // hidden until the candle is blown.
         window.scrollTo(0, 0);
         try {
           primeSong();
@@ -4316,6 +4323,12 @@
       // from backup handlers that cannot tell whether music already runs.
       function startSong() {
         musicOn = true;
+        // Music is starting, so its control must be visible: the
+        // button is hidden until the candle is blown, and every
+        // start path reveals it so playing music never lacks a
+        // visible pause control.
+        var mbStart = document.getElementById("musicBtn");
+        if (mbStart) mbStart.style.display = "";
         applyMusicState();
       }
 
@@ -5407,12 +5420,30 @@
           layoutSlides();
         });
         // ---- Section background follows the centre photo ----
-        // Two stacked blurred layers inside #s-slides crossfade to
-        // whichever photo is nearest the centre. Discrete moves
-        // (arrows, dots, side taps, auto-advance) update promptly;
-        // during continuous drag / trackpad motion the updates are
-        // debounced (~160ms of quiet) so the background settles on
-        // the nearest photo instead of strobing through every frame.
+        // Two stacked blurred layers inside #s-slides show whichever
+        // photo is nearest the centre, under the pink wash. The old
+        // version flashed when the centre changed, for three reasons
+        // this rewrite removes:
+        //  (a) both layers faded at once (outgoing 1->0 while the
+        //      incoming went 0->1), so mid-fade the stack was
+        //      semi-transparent and the page background blinked
+        //      through;
+        //  (b) the incoming layer's image was often not decoded yet
+        //      when its fade started, so it painted blank mid-fade;
+        //  (c) a short debounce let rapid centre changes restart
+        //      the fade faster than it could finish, strobing — and
+        //      worse, the background still updated DURING a drag or
+        //      glide, so the full-section blurred layers repainted
+        //      again and again while photos passed, which reads as
+        //      continuous flashing on phone GPUs.
+        // Now: the background changes ONLY once the carousel has
+        // fully SETTLED (see the settle gate below) — never
+        // mid-motion; the incoming image is fully decoded BEFORE
+        // anything paints; and the incoming layer fades in ON TOP
+        // of the outgoing layer, which stays at FULL opacity
+        // underneath until the fade completes and is only then
+        // retired — the combined background is never see-through,
+        // so no frame can flash the plain page background.
         // Uses the same already-loaded image files — no new downloads.
         const bgLayers = Array.prototype.slice.call(
           document.querySelectorAll("#s-slides .slides-bg-layer"),
@@ -5421,43 +5452,193 @@
         let bgActiveLayer = 0;
         let bgTimer = null;
         let bgShownOnce = false;
+        let bgSeq = 0; // request token: only the latest may paint
+        let bgFadeFinish = null; // completes an in-flight fade at once
         const bgSrcFor = (idx) => {
           const img = slideEls[idx] && slideEls[idx].querySelector(".fgi");
           return img ? img.getAttribute("src") : null;
+        };
+        const settleBgFade = () => {
+          if (!bgFadeFinish) return;
+          const finish = bgFadeFinish;
+          bgFadeFinish = null;
+          finish();
         };
         const applySectionBg = (idx) => {
           if (!bgLayers.length || idx === bgCurrent) return;
           const src = bgSrcFor(idx);
           if (!src) return;
-          if (!bgShownOnce) {
-            bgLayers[0].style.backgroundImage = 'url("' + src + '")';
-            bgLayers[0].classList.add("active");
-            bgActiveLayer = 0;
-            bgShownOnce = true;
-            bgCurrent = idx;
+          const seq = ++bgSeq;
+          const slideImg =
+            slideEls[idx] && slideEls[idx].querySelector(".fgi");
+          // Decode first, paint second: wait until the photo's
+          // bitmap is fully decoded (the slide <img> is eager-loaded,
+          // and a throwaway Image for the same URL resolves from the
+          // same cache), so the background layer's first painted
+          // frame already contains the photo — never a blank one.
+          const decoded = (async () => {
+            try {
+              if (slideImg && slideImg.decode) await slideImg.decode();
+            } catch (e) {}
+            try {
+              const pre = new Image();
+              pre.src = src;
+              if (pre.decode) await pre.decode();
+            } catch (e) {}
+          })();
+          decoded.then(() => {
+            // A newer request superseded this one while decoding:
+            // drop it, so rapid switching yields ONE fade to the
+            // final photo instead of a strobe of partial fades.
+            if (seq !== bgSeq) return;
+            // If a fade is still running, complete it instantly
+            // (its incoming layer snaps to full opacity over the
+            // still-opaque outgoing one — no blank frame), then
+            // fade from that settled state.
+            settleBgFade();
+            if (bgShownOnce && idx === bgCurrent) return;
+            if (!bgShownOnce) {
+              const first = bgLayers[0];
+              first.style.backgroundImage = 'url("' + src + '")';
+              first.style.zIndex = "2";
+              void first.offsetWidth;
+              first.classList.add("active");
+              bgActiveLayer = 0;
+              bgShownOnce = true;
+              bgCurrent = idx;
+              return;
+            }
+            const inIdx = bgActiveLayer === 0 ? 1 : 0;
+            const inLayer = bgLayers[inIdx];
+            const outLayer = bgLayers[bgActiveLayer];
+            inLayer.style.backgroundImage = 'url("' + src + '")';
+            // Incoming paints ABOVE the outgoing layer; the wash
+            // (z-index 3 in CSS) stays above both.
+            inLayer.style.zIndex = "2";
+            outLayer.style.zIndex = "1";
+            // Flush so the decoded image is in place before the
+            // opacity fade starts.
+            void inLayer.offsetWidth;
+            if (reduceMotion) {
+              // Instant swap, still decode-first: no flash.
+              inLayer.classList.add("active");
+              outLayer.classList.remove("active");
+              bgActiveLayer = inIdx;
+              bgCurrent = idx;
+              return;
+            }
+            let done = false;
+            const finish = () => {
+              if (done) return;
+              done = true;
+              inLayer.removeEventListener("transitionend", onEnd);
+              if (bgFadeFinish === finish) bgFadeFinish = null;
+              // The incoming layer is now fully opaque on top, so
+              // retiring the outgoing one underneath is invisible.
+              outLayer.classList.remove("active");
+              bgActiveLayer = inIdx;
+              bgCurrent = idx;
+            };
+            const onEnd = (e) => {
+              if (e.target === inLayer && e.propertyName === "opacity")
+                finish();
+            };
+            inLayer.addEventListener("transitionend", onEnd);
+            bgFadeFinish = finish;
+            // Outgoing KEEPS .active (full opacity) for the whole
+            // fade; only the incoming layer animates, 0 -> 1 on top.
+            inLayer.classList.add("active");
+            // Fallback if transitionend is ever missed (the fade
+            // is 1.2s, so this sits safely past its end).
+            setTimeout(finish, 1400);
+          });
+        };
+        // ---- Settle gate: the ONLY path to a background change ----
+        // A request never paints directly. It records the photo the
+        // carousel is nearest to, and a lightweight poll (every
+        // ~90ms, a few property reads — no layout, no paint) waits
+        // until the carousel has FULLY settled:
+        //   - no drag in progress, no programmatic glide running,
+        //     no trackpad-wheel gesture or wheel settle running;
+        //   - the continuous position sits on a whole photo
+        //     (within 0.02 of an integer);
+        //   - ~480ms of quiet since the last observed movement.
+        // While the user drags or glides — however many photos
+        // pass, and even if they pause mid-drag — requests only
+        // update bgPendingIdx and the background stays FROZEN on
+        // the last settled photo: the blurred full-section layers
+        // never repaint mid-gesture. When the gate opens, exactly
+        // one slow (1.2s) fade runs to the settled photo. Arrow
+        // steps, dot / side-photo taps and auto-advance all end in
+        // a settle, so each still gets its one background change,
+        // just after its glide completes.
+        let bgPendingIdx = -1;
+        let bgSamplePos = null;
+        let bgQuietSince = 0;
+        const carouselInMotion = () => {
+          // posAnim / dragActive / wheelActive / wheelSettling are
+          // declared further down in this same closure; this helper
+          // only ever runs from the settle poll's timers, which
+          // cannot fire until the whole slider has initialised.
+          if (posAnim) return true;
+          if (dragActive) return true;
+          if (wheelActive || wheelSettling) return true;
+          return false;
+        };
+        const bgSettleCheck = () => {
+          bgTimer = null;
+          if (bgPendingIdx < 0) return;
+          // A fade is still running: wait for it to land, then
+          // re-evaluate against the photo it settled on.
+          if (bgFadeFinish) {
+            bgTimer = setTimeout(bgSettleCheck, 120);
             return;
           }
-          const nextLayer = bgActiveLayer === 0 ? 1 : 0;
-          bgLayers[nextLayer].style.backgroundImage = 'url("' + src + '")';
-          // Force a style flush so the new image is in place before
-          // the opacity crossfade starts (avoids a flicker).
-          void bgLayers[nextLayer].offsetWidth;
-          bgLayers[nextLayer].classList.add("active");
-          bgLayers[bgActiveLayer].classList.remove("active");
-          bgActiveLayer = nextLayer;
-          bgCurrent = idx;
+          if (bgPendingIdx === bgCurrent) {
+            bgPendingIdx = -1;
+            bgSamplePos = null;
+            return;
+          }
+          const now = performance.now();
+          const pos = posFloat;
+          if (
+            bgSamplePos === null ||
+            Math.abs(pos - bgSamplePos) > 0.0015 ||
+            carouselInMotion()
+          ) {
+            // Still moving (or a gesture is live): stay frozen,
+            // restart the quiet clock, keep watching.
+            bgSamplePos = pos;
+            bgQuietSince = now;
+            bgTimer = setTimeout(bgSettleCheck, 90);
+            return;
+          }
+          const atWhole = Math.abs(pos - Math.round(pos)) <= 0.02;
+          if (!atWhole || now - bgQuietSince < 480) {
+            bgTimer = setTimeout(bgSettleCheck, 90);
+            return;
+          }
+          const idx = bgPendingIdx;
+          bgPendingIdx = -1;
+          bgSamplePos = null;
+          applySectionBg(idx);
         };
         const scheduleSectionBg = (idx, immediate) => {
-          if (immediate || reduceMotion) {
-            if (bgTimer) { clearTimeout(bgTimer); bgTimer = null; }
+          if (immediate && !bgShownOnce) {
+            // First paint only: the page has just loaded and the
+            // carousel is settled by definition — show it at once
+            // (still decode-first inside applySectionBg).
             applySectionBg(idx);
             return;
           }
-          if (bgTimer) clearTimeout(bgTimer);
-          bgTimer = setTimeout(() => {
-            bgTimer = null;
-            applySectionBg(idx);
-          }, 160);
+          bgPendingIdx = idx;
+          if (!bgTimer) {
+            if (bgSamplePos === null) {
+              bgSamplePos = posFloat;
+              bgQuietSince = performance.now();
+            }
+            bgTimer = setTimeout(bgSettleCheck, 90);
+          }
         };
         const syncSlideUI = (near) => {
           cap.textContent = slideEls[near].querySelector(".fgi").alt;
@@ -6204,6 +6385,12 @@
         clean.removeAttribute("onclick");
         btn.parentNode.replaceChild(clean, btn);
         btn = clean;
+        // Hidden until the candle is blown: the button starts
+        // display:none in the markup, and this gate re-asserts it
+        // at load so no earlier entry script can have revealed it.
+        // It is revealed only from apply() when music turns on
+        // (the candle blow's start path) and by the blow handlers.
+        btn.style.display = "none";
 
         var on = false;          // the one state flag every tap follows
         var audio = null;        // the song <audio> element
@@ -6279,6 +6466,12 @@
         }
         function apply() {
           label();
+          // Whenever music is on, its control must be on screen:
+          // this is the reveal point for the candle blow (which
+          // funnels through start() -> apply()), so the button
+          // appears at the exact moment the song starts and then
+          // stays visible for the rest of the session.
+          if (on) { try { btn.style.display = ""; } catch (e) {} }
           if (!on) {
             if (audio) { try { audio.pause(); } catch (e) {} }
             stopSynth();
